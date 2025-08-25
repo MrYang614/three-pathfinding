@@ -7,21 +7,28 @@ import {
 import { Utils } from './Utils';
 import { AStar } from './AStar';
 import { Builder } from './Builder';
-import { Channel } from './Channel';
+import { funnel3D } from './Channel';
+
+const $plane = new Plane();
+const $point = new Vector3();
+const $triangle = new Triangle();
 
 /**
  * Defines an instance of the pathfinding module, with one or more zones.
  */
 class Pathfinding {
+
+	zones;
+
 	constructor() {
 		this.zones = {};
 	}
 
 	/**
 	 * (Static) Builds a zone/node set from navigation mesh geometry.
-	 * @param  {BufferGeometry} geometry
-	 * @param  {number} tolerance Vertex welding tolerance.
-	 * @return {Zone}
+	 * @param geometry
+	 * @param tolerance Vertex welding tolerance.
+	 * @return
 	 */
 	static createZone(geometry, tolerance = 1e-4) {
 		return Builder.buildZone(geometry, tolerance);
@@ -29,51 +36,20 @@ class Pathfinding {
 
 	/**
 	 * Sets data for the given zone.
-	 * @param {string} zoneID
-	 * @param {Zone} zone
+	 * @param zoneID
+	 * @param zone
 	 */
 	setZoneData(zoneID, zone) {
 		this.zones[zoneID] = zone;
 	}
 
 	/**
-	 * Returns a random node within a given range of a given position.
-	 * @param  {string} zoneID
-	 * @param  {number} groupID
-	 * @param  {Vector3} nearPosition
-	 * @param  {number} nearRange
-	 * @return {Node}
-	 */
-	getRandomNode(zoneID, groupID, nearPosition, nearRange) {
-
-		if (!this.zones[zoneID]) return new Vector3();
-
-		nearPosition = nearPosition || null;
-		nearRange = nearRange || 0;
-
-		const candidates = [];
-		const polygons = this.zones[zoneID].groups[groupID];
-
-		polygons.forEach((p) => {
-			if (nearPosition && nearRange) {
-				if (Utils.distanceToSquared(nearPosition, p.centroid) < nearRange * nearRange) {
-					candidates.push(p.centroid);
-				}
-			} else {
-				candidates.push(p.centroid);
-			}
-		});
-
-		return Utils.sample(candidates) || new Vector3();
-	}
-
-	/**
 	 * Returns the closest node to the target position.
-	 * @param  {Vector3} position
-	 * @param  {string}  zoneID
-	 * @param  {number}  groupID
-	 * @param  {boolean} checkPolygon
-	 * @return {Node}
+	 * @param position
+	 * @param zoneID
+	 * @param groupID
+	 * @param checkPolygon
+	 * @return
 	 */
 	getClosestNode(position, zoneID, groupID, checkPolygon = false) {
 		const nodes = this.zones[zoneID].groups[groupID];
@@ -82,7 +58,9 @@ class Pathfinding {
 		let closestDistance = Infinity;
 
 		nodes.forEach((node) => {
+
 			const distance = Utils.distanceToSquared(node.centroid, position);
+
 			if (distance < closestDistance
 				&& (!checkPolygon || Utils.isVectorInPolygon(position, node, vertices))) {
 				closestNode = node;
@@ -97,11 +75,11 @@ class Pathfinding {
 	 * Returns a path between given start and end points. If a complete path
 	 * cannot be found, will return the nearest endpoint available.
 	 *
-	 * @param  {Vector3} startPosition Start position.
-	 * @param  {Vector3} targetPosition Destination.
-	 * @param  {string} zoneID ID of current zone.
-	 * @param  {number} groupID Current group ID.
-	 * @return {Array<Vector3>} Array of points defining the path.
+	 * @param startPosition Start position.
+	 * @param targetPosition Destination.
+	 * @param zoneID ID of current zone.
+	 * @param groupID Current group ID.
+	 * @return  Array of points defining the path.
 	 */
 	findPath(startPosition, targetPosition, zoneID, groupID) {
 		const nodes = this.zones[zoneID].groups[groupID];
@@ -117,6 +95,8 @@ class Pathfinding {
 
 		const paths = AStar.search(nodes, closestNode, farthestNode);
 
+		const nodePath = [...paths];
+
 		const getPortalFromTo = function (a, b) {
 			for (var i = 0; i < a.neighbours.length; i++) {
 				if (a.neighbours[i] === b.id) {
@@ -126,15 +106,22 @@ class Pathfinding {
 		};
 
 		// We have the corridor, now pull the rope.
-		const channel = new Channel();
-		channel.push(startPosition);
+
+		// channel.push(startPosition);
+
+		const channelPortals = [];
 
 		if (paths.length) {
 			const portal1 = getPortalFromTo(closestNode, paths[0]);
-			channel.push(
-				vertices[portal1[0]],
-				vertices[portal1[1]]
-			);
+			const portal = {
+				left: vertices[portal1[0]],
+				right: vertices[portal1[1]]
+			};
+			const v1 = new Vector3().subVectors(startPosition, portal.left).normalize();
+			const v2 = new Vector3().subVectors(portal.right, startPosition).normalize();
+			if (v1.dot(v2) !== 1) {
+				channelPortals.push(portal);
+			}
 		}
 
 		for (let i = 0; i < paths.length; i++) {
@@ -143,31 +130,52 @@ class Pathfinding {
 
 			if (nextPolygon) {
 				const portals = getPortalFromTo(polygon, nextPolygon);
-				channel.push(
-					vertices[portals[0]],
-					vertices[portals[1]]
+				channelPortals.push(
+					{
+						left: vertices[portals[0]],
+						right: vertices[portals[1]]
+					}
 				);
 			}
 		}
-		channel.push(targetPosition);
-		channel.stringPull();
+		channelPortals.push({
+			left: targetPosition,
+			right: targetPosition
+		});
+
+		const newChannelPortals = [];
+		{
+			// redefine the portal's left and right
+			let apex = startPosition.clone();
+			for (let i = 0; i < channelPortals.length; i++) {
+				const portal = channelPortals[i];
+				if (Utils.judgeDir(apex, portal.left, portal.right) < 0) {
+					newChannelPortals.push({
+						left: portal.left,
+						right: portal.right
+					});
+				} else {
+					newChannelPortals.push({
+						left: portal.right,
+						right: portal.left
+					});
+				}
+				apex.addVectors(portal.left, portal.right).multiplyScalar(0.5);
+			}
+		}
+
+
+		const path = funnel3D(startPosition, targetPosition, newChannelPortals);
 
 		// Return the path, omitting first position (which is already known).
-		const path = channel.path.map((c) => new Vector3(c.x, c.y, c.z));
+		// const path = channel.path.map((c) => new Vector3(c.x, c.y, c.z));
 		path.shift();
-		return path;
-	}
-}
 
-/**
- * Returns closest node group ID for given position.
- * @param  {string} zoneID
- * @param  {Vector3} position
- * @return {number}
- */
-Pathfinding.prototype.getGroup = (function () {
-	const plane = new Plane();
-	return function (zoneID, position, checkPolygon = false) {
+		return path
+
+	}
+
+	getGroup(zoneID, position, checkPolygon = false) {
 		if (!this.zones[zoneID]) return null;
 
 		let closestNodeGroup = null;
@@ -178,18 +186,18 @@ Pathfinding.prototype.getGroup = (function () {
 			const group = zone.groups[i];
 			for (const node of group) {
 				if (checkPolygon) {
-					plane.setFromCoplanarPoints(
+					$plane.setFromCoplanarPoints(
 						zone.vertices[node.vertexIds[0]],
 						zone.vertices[node.vertexIds[1]],
 						zone.vertices[node.vertexIds[2]]
 					);
-					if (Math.abs(plane.distanceToPoint(position)) < 0.01) {
+					if (Math.abs($plane.distanceToPoint(position)) < 0.01) {
 						const poly = [
 							zone.vertices[node.vertexIds[0]],
 							zone.vertices[node.vertexIds[1]],
 							zone.vertices[node.vertexIds[2]]
 						];
-						if (Utils.isPointInPoly(poly, position)) {
+						if (Utils.isPointInTriangle(poly, position)) {
 							return i;
 						}
 					}
@@ -204,66 +212,58 @@ Pathfinding.prototype.getGroup = (function () {
 
 		return closestNodeGroup;
 	};
-}());
 
-/**
- * Clamps a step along the navmesh, given start and desired endpoint. May be
- * used to constrain first-person / WASD controls.
- *
- * @param  {Vector3} start
- * @param  {Vector3} end Desired endpoint.
- * @param  {Node} node
- * @param  {string} zoneID
- * @param  {number} groupID
- * @param  {Vector3} endTarget Updated endpoint.
- * @return {Node} Updated node.
- */
-Pathfinding.prototype.clampStep = (function () {
-	const point = new Vector3();
-	const plane = new Plane();
-	const triangle = new Triangle();
+	/**
+	 * Clamps a step along the navmesh, given start and desired endpoint. May be
+	 * used to constrain first-person / WASD controls.
+	 *
+	 * @param  start start point
+	 * @param  end Desired end point.
+	 * @param  zoneID
+	 * @param  groupID
+	 * @param  endTarget Updated endpoint.
+	 * @return  Updated node.
+	 */
+	clampStep(startRef, endRef, zoneID, groupID, endTarget) {
 
-	const endPoint = new Vector3();
+		const closestPlayerNode = this.getClosestNode(startRef, zoneID, groupID);
 
-	let closestNode;
-	let closestPoint = new Vector3();
-	let closestDistance;
-
-	return function (startRef, endRef, node, zoneID, groupID, endTarget) {
 		const vertices = this.zones[zoneID].vertices;
 		const nodes = this.zones[zoneID].groups[groupID];
 
-		const nodeQueue = [node];
+		const nodeQueue = [closestPlayerNode];
 		const nodeDepth = {};
-		nodeDepth[node.id] = 0;
+		nodeDepth[closestPlayerNode.id] = 0;
 
-		closestNode = undefined;
-		closestPoint.set(0, 0, 0);
-		closestDistance = Infinity;
+		const endPoint = new Vector3();
 
-		// Project the step along the current node.
-		plane.setFromCoplanarPoints(
-			vertices[node.vertexIds[0]],
-			vertices[node.vertexIds[1]],
-			vertices[node.vertexIds[2]]
+		let closestNode = undefined;
+		let closestPoint = new Vector3();
+		let closestDistance = Infinity;
+
+		// Project the step along the current closestPlayerNode.
+		$plane.setFromCoplanarPoints(
+			vertices[closestPlayerNode.vertexIds[0]],
+			vertices[closestPlayerNode.vertexIds[1]],
+			vertices[closestPlayerNode.vertexIds[2]]
 		);
-		plane.projectPoint(endRef, point);
-		endPoint.copy(point);
+		$plane.projectPoint(endRef, $point);
+		endPoint.copy($point);
 
 		for (let currentNode = nodeQueue.pop(); currentNode; currentNode = nodeQueue.pop()) {
 
-			triangle.set(
+			$triangle.set(
 				vertices[currentNode.vertexIds[0]],
 				vertices[currentNode.vertexIds[1]],
 				vertices[currentNode.vertexIds[2]]
 			);
 
-			triangle.closestPointToPoint(endPoint, point);
+			$triangle.closestPointToPoint(endPoint, $point);
 
-			if (point.distanceToSquared(endPoint) < closestDistance) {
+			if ($point.distanceToSquared(endPoint) < closestDistance) {
 				closestNode = currentNode;
-				closestPoint.copy(point);
-				closestDistance = point.distanceToSquared(endPoint);
+				closestPoint.copy($point);
+				closestDistance = $point.distanceToSquared(endPoint);
 			}
 
 			const depth = nodeDepth[currentNode.id];
@@ -280,37 +280,10 @@ Pathfinding.prototype.clampStep = (function () {
 
 		endTarget.copy(closestPoint);
 		return closestNode;
-	};
-}());
 
-/**
- * Defines a zone of interconnected groups on a navigation mesh.
- *
- * @type {Object}
- * @property {Array<Group>} groups
- * @property {Array<Vector3>} vertices
- */
-const Zone = {}; // jshint ignore:line
+	}
 
-/**
- * Defines a group within a navigation mesh.
- *
- * @type {Object}
- */
-const Group = {}; // jshint ignore:line
+}
 
-/**
- * Defines a node (or polygon) within a group.
- *
- * @type {Object}
- * @property {number} id
- * @property {Array<number>} neighbours IDs of neighboring nodes.
- * @property {Array<number>} vertexIds
- * @property {Vector3} centroid
- * @property {Array<Array<number>>} portals Array of portals, each defined by two vertex IDs.
- * @property {boolean} closed
- * @property {number} cost
- */
-const Node = {}; // jshint ignore:line
 
 export { Pathfinding };
